@@ -1,3 +1,5 @@
 # .bat 必须是 CRLF，cmd 对 LF 换行的批处理解析行为不一致
 *.bat text eol=crlf
+# 源码统一 LF，build.ps1 内部再归一化，产物字节稳定
+*.ps1 text eol=lf
 *.md text eol=lf
