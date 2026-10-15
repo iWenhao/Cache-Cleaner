@@ -922,12 +922,12 @@ if ($dangerList.Count -gt 0) {
     Write-Host ''
     Write-Host ('  警告：以下项目会删除内容或改动系统设置 -> {0}' -f (($dangerList | ForEach-Object { $_.Name }) -join '、')) -ForegroundColor Red
     $ack = $null
-    try { $ack = Read-Host '  确认请输入 DELETE，其他任意输入则取消' } catch { $ack = $null }
+    try { $ack = Read-Host '  确认请输入 DEL，其他任意输入则取消' } catch { $ack = $null }
     if ($null -eq $ack) {
         Write-Host '  无法读取键盘输入，已取消，未删除任何文件。' -ForegroundColor Yellow
         return
     }
-    if ($ack -ne 'DELETE') {
+    if ($ack -ne 'DEL') {
         Write-Host '  已取消，未删除任何文件。' -ForegroundColor Yellow
         return
     }
