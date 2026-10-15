@@ -1,0 +1,3 @@
+# .bat 必须是 CRLF，cmd 对 LF 换行的批处理解析行为不一致
+*.bat text eol=crlf
+*.md text eol=lf
