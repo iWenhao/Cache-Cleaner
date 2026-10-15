@@ -386,6 +386,31 @@ foreach ($root in @("$env:LOCALAPPDATA\Google\Chrome\User Data", "$env:LOCALAPPD
             }
         }
 }
+# Firefox 的 disk cache 在 LOCALAPPDATA 那份 profile 里，不在 Roaming 那份。
+# 本机实测：Roaming\...\Profiles\yad34gi4.default-release-1737036297271 没有 cache2，
+# cache2 1020.2 MB / 12649 文件在 LOCALAPPDATA 同名目录下。
+$ffRoot = "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles"
+if (Test-Path -LiteralPath $ffRoot) {
+    Get-ChildItem -LiteralPath $ffRoot -Directory -Force -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            foreach ($sub in @('cache2', 'startupCache')) {
+                $full = Join-Path $_.FullName $sub
+                if (Test-Path -LiteralPath $full) { $browserPaths += $full }
+            }
+        }
+}
+
+# VS Code：只收纯缓存目录。User（设置/历史/workspaceStorage）、.vscode\extensions（插件本体）、
+# Local Storage / Session Storage / WebStorage（站点数据）、logs（崩溃后还要看）都不碰。
+$vscodePaths = @()
+foreach ($codeRoot in @("$env:APPDATA\Code", "$env:APPDATA\Code - Insiders")) {
+    if (-not (Test-Path -LiteralPath $codeRoot)) { continue }
+    foreach ($sub in @('Cache', 'Code Cache', 'GPUCache', 'CachedData', 'CachedExtensionVSIXs',
+                       'Crashpad', 'DawnCache', 'DawnGraphiteCache', 'DawnWebGPUCache')) {
+        $full = Join-Path $codeRoot $sub
+        if (Test-Path -LiteralPath $full) { $vscodePaths += $full }
+    }
+}
 
 Add-Target @{
     Name    = '用户 Temp'
@@ -415,7 +440,13 @@ Add-Target @{
 Add-Target @{
     Name    = '浏览器缓存'
     Paths   = $browserPaths
-    Note    = 'Chrome/Edge，建议先关闭浏览器'
+    Note    = 'Chrome/Edge/Firefox，建议先关闭浏览器'
+}
+
+Add-Target @{
+    Name    = 'VS Code 缓存'
+    Paths   = $vscodePaths
+    Note    = '只清 Cache/CachedData/CachedExtensionVSIXs/Crashpad 等，不动设置与插件本体；建议先关闭 VS Code'
 }
 
 Add-Target @{

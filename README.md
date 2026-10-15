@@ -4,7 +4,7 @@ Windows 单文件缓存清理工具。双击即用，不需要安装任何依赖
 
 ## 产物是什么样的
 
-交付物只有一个文件：`一键清理缓存.bat`（约 65 KB，纯 ASCII 文本，没有配套文件、不需要安装）。里面是 cmd 引导壳 + base64 的 PowerShell 正文，运行时自己解码执行，所以双击它等于同时带了脚本和解释器入口。
+交付物只有一个文件：`一键清理缓存.bat`（约 76 KB，纯 ASCII 文本，没有配套文件、不需要安装）。里面是 cmd 引导壳 + base64 的 PowerShell 正文，运行时自己解码执行，所以双击它等于同时带了脚本和解释器入口。
 
 双击后的流程：
 
@@ -17,7 +17,7 @@ Windows 单文件缓存清理工具。双击即用，不需要安装任何依赖
 
 ## 普通用户怎么用
 
-三步：双击 → 等扫描完 → 直接回车。回车只清理默认项（用户 Temp、包管理器缓存含 pnpm store 瘦身、浏览器缓存、Windows 错误报告、缩略图缓存），其余一律不动。
+三步：双击 → 等扫描完 → 直接回车。回车只清理默认项（用户 Temp、包管理器缓存含 pnpm store 瘦身、浏览器缓存含 Firefox、VS Code 缓存、Windows 错误报告、缩略图缓存），其余一律不动。
 
 想做得更多：
 
@@ -63,19 +63,38 @@ Windows 单文件缓存清理工具。双击即用，不需要安装任何依赖
 | 2 | Updater 更新缓存（按目录名后缀匹配，需自行确认） | 否 |
 | 3 | 包管理器缓存（npm / pnpm / yarn / bun / pip / uv） | 是 |
 | 4 | pnpm store 瘦身（占用列 = 仓库总体积） | 是 |
-| 5 | 浏览器缓存（Chrome / Edge，仅 Cache / Code Cache / GPUCache） | 是 |
-| 6 | Windows 错误报告 | 是 |
-| 7 | 缩略图/图标缓存 | 是 |
-| 8 | 回收站 | 否，需 DELETE 确认 |
-| 9 | 残留快捷方式 | 否，需 DELETE 确认 |
-| 10 | 打开方式残留（按 exe **文件名**判定，不比较路径） | 否，需 DELETE 确认 |
-| 11 | 卸载表残留（按 InstallLocation 是否存在判定） | 否，需 DELETE 确认 |
-| 12 | 旧版本残留（Electron，整目录递归删除） | 否，需 DELETE 确认 |
-| 13-15 | Windows 更新缓存 / 传递优化 / 系统 Temp | 否，需管理员 |
-| 16 | Windows.old | 否，需管理员，且需 DELETE 确认 |
-| 17 | 快捷方式小箭头（改注册表，不是缓存） | 否，需管理员，且需 DELETE 确认 |
+| 5 | 浏览器缓存（Chrome / Edge 的 `Cache` / `Code Cache` / `GPUCache` + Firefox 的 `cache2` / `startupCache`） | 是 |
+| 6 | VS Code 缓存（`%APPDATA%\Code` 与 `Code - Insiders`，见下） | 是 |
+| 7 | Windows 错误报告 | 是 |
+| 8 | 缩略图/图标缓存 | 是 |
+| 9 | 回收站 | 否，需 DELETE 确认 |
+| 10 | 残留快捷方式 | 否，需 DELETE 确认 |
+| 11 | 打开方式残留（按 exe **文件名**判定，不比较路径） | 否，需 DELETE 确认 |
+| 12 | 卸载表残留（按 InstallLocation 是否存在判定） | 否，需 DELETE 确认 |
+| 13 | 旧版本残留（Electron，整目录递归删除） | 否，需 DELETE 确认 |
+| 14-16 | Windows 更新缓存 / 传递优化 / 系统 Temp | 否，需管理员 |
+| 17 | Windows.old | 否，需管理员，且需 DELETE 确认 |
+| 18 | 快捷方式小箭头（改注册表，不是缓存） | 否，需管理员，且需 DELETE 确认 |
 
-第 13-16 项在以管理员身份运行时自动列出（或加 `-IncludeAdmin`）。第 17 项始终列出，普通用户选中只会提示需要提权、不改动任何东西；非管理员运行时因为 13-16 不列出，它是第 13 行。选中危险项后会逐条列出明细再让你确认。
+第 14-17 项在以管理员身份运行时自动列出（或加 `-IncludeAdmin`）。第 18 项始终列出，普通用户选中只会提示需要提权、不改动任何东西；非管理员运行时因为 14-17 不列出，它是第 14 行。选中危险项后会逐条列出明细再让你确认。
+
+### 浏览器缓存
+
+浏览器按 profile 枚举，只认白名单里的子目录：Chrome / Edge 取 `Default` 与 `Profile N`，Firefox 取 `%LOCALAPPDATA%\Mozilla\Firefox\Profiles\*`。
+
+Firefox 的磁盘缓存在 **LOCALAPPDATA** 那份 profile 里，不在 Roaming 那份——本机实测 Roaming profile 根本没有 `cache2`，1020 MB 全在 LOCALAPPDATA 同名目录下。Roaming 里的 `storage`（IndexedDB，105.6 MB）、`security_state`、`extensions`、`gmp-*` 都是数据不是缓存，不碰。`safebrowsing`（12.2 MB）是恶意网站特征库，删了要重新下载、且短期内降低防护，也不碰。
+
+### VS Code 缓存
+
+只删这几个目录里的文件，目录本身保留：
+
+`Cache`、`Code Cache`、`GPUCache`、`CachedData`、`CachedExtensionVSIXs`、`Crashpad`、`DawnCache`、`DawnGraphiteCache`、`DawnWebGPUCache`
+
+本机实测合计约 1.7 GB，其中 `CachedExtensionVSIXs` 807 MB（已装完的安装包）、`Crashpad` 386 MB（崩溃转储）、`Cache` 331 MB、`CachedData` 203 MB（重启后自动重建）。
+
+明确不碰：`User`（设置、`History`、`workspaceStorage`）、`%USERPROFILE%\.vscode\extensions`（插件本体）、`Local Storage` / `Session Storage` / `WebStorage`、`Service Worker`、`Dictionaries`、`logs`（崩溃后还要靠它排查，而且只有 1 MB）。
+
+VS Code 开着的时候删，被占用的文件会统计成"跳过 N 个"，不会静默——先关掉再清更干净。
 
 ## 安全设计
 
@@ -105,11 +124,16 @@ Windows 单文件缓存清理工具。双击即用，不需要安装任何依赖
 
 | 位置 | 实测 | 没做的原因 |
 |---|---|---|
-| `%LOCALAPPDATA%\Microsoft\Terminal Server Client\Cache` | 300 MB / 4 个文件 | 远程桌面位图缓存，其实是最好加的一项，还没加 |
-| `C:\Windows\Logs\CBS` | 113 MB | 需管理员；组件服务日志，删法要确认 |
-| `%LOCALAPPDATA%\Microsoft\Windows\WebCache` | 63 MB | 被 SearchIndexer 长期独占，删除多半只会得到"跳过 N 个" |
-| `C:\Windows\Logs\DISM` | 8 MB | 需管理员 |
-| Chrome/Edge 的 `DawnWebGPUCache`、`DawnGraphiteCache` | 6.6 MB | 浏览器项只认 `Cache` / `Code Cache` / `GPUCache`，这两处没列进白名单 |
+| `%LOCALAPPDATA%\Microsoft\Terminal Server Client\Cache` | 300.2 MB / 4 个文件 | 远程桌面位图缓存，其实是最好加的一项，还没加 |
+| `C:\Windows\Logs\CBS` | 112.9 MB / 8 个文件 | 需管理员；组件服务日志，删法要确认 |
+| `%LOCALAPPDATA%\Microsoft\Windows\WebCache` | 62.5 MB / 11 个文件 | 被 SearchIndexer 长期独占，删除多半只会得到"跳过 N 个" |
+| `C:\Windows\Logs\DISM` | 7.7 MB / 1 个文件 | 需管理员 |
+| Chrome 的 `DawnWebGPUCache` + `DawnGraphiteCache` | 6.6 MB | 浏览器项只认 `Cache` / `Code Cache` / `GPUCache`，这两处没列进白名单 |
+
+另外两处实测过、确认不该加的：
+
+- Chrome `Service Worker\CacheStorage` 1.9 GB——读了一下它的 LevelDB，登记的是 `mail.google.com` 之类的站点离线数据，删了等于清掉用户在网站上的本地数据，属于"数据"不是"缓存"。
+- Edge `User Data\Default` 在本机一个 `Cache` / `Code Cache` / `GPUCache` 都没有，这一项对 Edge 实际贡献 0；换台机器才有。
 
 ## 实现说明
 
