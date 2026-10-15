@@ -20,6 +20,7 @@ $IncludeAdmin = $false
 $NoPause = $false
 $Report = $false
 $MinAgeDays = 0
+$script:ArgIssues = @()
 for ($i = 0; $i -lt $args.Count; $i++) {
     $a = [string]$args[$i]
     if ($a -eq '-DryRun') { $DryRun = $true }
@@ -29,9 +30,14 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     elseif ($a -eq '-Report') { $Report = $true }
     elseif ($a -eq '-MinAgeDays') {
         $i++
+        $n = ''
+        if ($i -lt $args.Count) { $n = [string]$args[$i] }
         $v = 0
-        if ([int]::TryParse([string]$args[$i], [ref]$v)) { $MinAgeDays = $v }
+        if ([int]::TryParse($n, [ref]$v) -and $v -ge 0) { $MinAgeDays = $v }
+        elseif ([string]::IsNullOrWhiteSpace($n)) { $script:ArgIssues += '-MinAgeDays 后面缺少天数，本次不按年龄过滤' }
+        else { $script:ArgIssues += ('-MinAgeDays 的值 "{0}" 不是非负整数，本次不按年龄过滤' -f $n) }
     }
+    else { $script:ArgIssues += ('未识别的参数 "{0}"，已忽略' -f $a) }
 }
 
 $script:Cutoff = $null
@@ -92,10 +98,14 @@ function Get-FilesSafe($path, $recurse, $patterns) {
     if ($null -eq $rootItem) { return @() }
     # 根目录自身是链接时不碰：删它等于删链接指向的真实内容
     if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return @() }
-    $items = @()
+    $items = New-Object System.Collections.Generic.List[object]
     if ($recurse) {
-        # 手动递归：只下钻普通目录。Get-ChildItem -Recurse 会穿过目录联接，
-        # 而穿过联接拿到的文件自身不带 ReparsePoint 标记，事后过滤拦不住。
+        # 手动递归，两个原因：
+        # 1) 目录联接不能下钻。穿过联接拿到的文件自身不带 ReparsePoint 标记，事后过滤拦不住。
+        # 2) PowerShell 5.1 的 Get-ChildItem -Recurse 会整片漏掉子树。本机 pnpm store 实测：
+        #    手动递归与 [IO.Directory]::EnumerateFiles 都是 99326 个文件，-Recurse 只有 22899，
+        #    差的正好是 projects 整个子树（-Recurse 对它返回 0 个文件）。
+        #    少报体积、该删的文件删不掉，而且清单和实删不一致更危险。
         $stack = New-Object System.Collections.Generic.Stack[string]
         $stack.Push($path)
         while ($stack.Count -gt 0) {
@@ -104,14 +114,19 @@ function Get-FilesSafe($path, $recurse, $patterns) {
                 if ($e.PSIsContainer) {
                     if (($e.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) { $stack.Push($e.FullName) }
                 } else {
-                    $items += $e
+                    $items.Add($e)
                 }
             }
         }
     } else {
-        $items = @(Get-ChildItem -LiteralPath $path -File -Force -ErrorAction SilentlyContinue)
+        foreach ($e in @(Get-ChildItem -LiteralPath $path -File -Force -ErrorAction SilentlyContinue)) {
+            $items.Add($e)
+        }
     }
-    return @($items | Where-Object { Test-Pattern $_.Name $patterns })
+    if (-not $patterns -or $patterns.Count -eq 0) { return $items.ToArray() }
+    $filtered = New-Object System.Collections.Generic.List[object]
+    foreach ($e in $items) { if (Test-Pattern $e.Name $patterns) { $filtered.Add($e) } }
+    return $filtered.ToArray()
 }
 
 function Measure-One($t) {
@@ -181,18 +196,23 @@ function Get-LnkTarget([string]$lnkPath) {
         if ($hdr -ge 0x24) {
             $bOff = [BitConverter]::ToUInt32($b, $pos + 0x1C)
             $sOff = [BitConverter]::ToUInt32($b, $pos + 0x20)
-            if ($bOff -gt 0) {
-                $base = ''; $i = $pos + $bOff
-                while ($i + 1 -lt $b.Length) { $u = [BitConverter]::ToUInt16($b, $i); if ($u -eq 0) { break }; $base += [char]$u; $i += 2 }
-                $suff = ''; $j = $pos + $sOff
+            # 偏移异常就当解析不出来。掉到下面 ANSI 分支会拿 VolumeID 偏移当路径读，
+            # 拼出一个不存在的路径，正常快捷方式会被判成残留而删掉。
+            if ($bOff -le 0) { return $null }
+            $base = ''; $i = $pos + $bOff
+            while ($i + 1 -lt $b.Length) { $u = [BitConverter]::ToUInt16($b, $i); if ($u -eq 0) { break }; $base += [char]$u; $i += 2 }
+            $suff = ''
+            if ($sOff -gt 0) {
+                $j = $pos + $sOff
                 while ($j + 1 -lt $b.Length) { $u = [BitConverter]::ToUInt16($b, $j); if ($u -eq 0) { break }; $suff += [char]$u; $j += 2 }
-                return ($base + $suff)
             }
+            return ($base + $suff)
         }
         # 旧格式：LocalBasePath / CommonPathSuffix 以系统 ANSI 代码页存储。
         # 不能写 [Text.Encoding]::Default —— 它在 PowerShell 7 下是 UTF-8。
         $bOff = [BitConverter]::ToUInt32($b, $pos + 0x10)
         $sOff = [BitConverter]::ToUInt32($b, $pos + 0x18)
+        if ($bOff -le 0 -or $sOff -le 0) { return $null }
         if ($pos + $bOff -ge $b.Length -or $pos + $sOff -ge $b.Length) { return $null }
         $enc = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.ANSICodePage)
         $bb = New-Object System.Collections.Generic.List[byte]
@@ -231,7 +251,7 @@ function Find-DeadShortcuts {
     foreach ($r in $roots) {
         if ([string]::IsNullOrWhiteSpace($r)) { continue }
         if (-not (Test-Path -LiteralPath $r)) { continue }
-        foreach ($l in @(Get-ChildItem -LiteralPath $r -Filter *.lnk -Recurse -Force -ErrorAction SilentlyContinue)) {
+        foreach ($l in (Get-FilesSafe $r $true @('*.lnk'))) {
             if (-not (Test-AgeOk $l)) { continue }
             $t = Get-LnkTarget $l.FullName
             if ([string]::IsNullOrWhiteSpace($t)) { continue }
@@ -383,7 +403,7 @@ Add-Target @{
 Add-Target @{
     Name    = 'pnpm store 瘦身'
     Kind    = 'Pnpm'
-    Note    = '调用 pnpm store prune，不影响现有项目'
+    Note    = 'pnpm store prune 只删无引用的包；左列是整个仓库体积'
 }
 
 Add-Target @{
@@ -443,7 +463,8 @@ Add-Target @{
     Name    = '旧版本残留'
     Kind    = 'OldVersion'
     Default = $false
-    Note    = 'Electron 应用留下的旧版本目录'
+    Danger  = $true
+    Note    = 'Electron 应用留下的旧版本目录，整目录递归删除'
 }
 
 if ($IncludeAdmin -or $IsAdmin) {
@@ -499,6 +520,15 @@ if ($IsAdmin) {
     Write-Host '        「Windows 更新缓存 / 传递优化缓存 / 系统 Temp / Windows.old」' -ForegroundColor DarkYellow
 }
 Write-Host ''
+if ($script:ArgIssues.Count -gt 0) {
+    foreach ($w in $script:ArgIssues) {
+        Write-Host ('  参数提示: {0}' -f $w) -ForegroundColor Yellow
+    }
+    if ($script:ArgIssues.Count -gt 0 -and -not $DryRun -and -not $Report) {
+        Write-Host '  若本意是只看不删，请改用 -DryRun 再运行一次。' -ForegroundColor Yellow
+    }
+    Write-Host ''
+}
 
 if ($Report) {
     Write-Host '  正在枚举疑似残留的用户目录（只读，不删除任何东西），请稍候...' -ForegroundColor DarkGray
@@ -528,7 +558,7 @@ if ($Report) {
             if ($key.Length -lt 2) { continue }
             if ($known.ContainsKey($key)) { continue }
             if ($d.Name -match $skip) { continue }
-            $files = @(Get-ChildItem -LiteralPath $d.FullName -Recurse -File -Force -ErrorAction SilentlyContinue)
+            $files = Get-FilesSafe $d.FullName $true @()
             $sum = 0L
             $newest = $null
             foreach ($f in $files) {
@@ -619,12 +649,13 @@ foreach ($t in $targets) {
     }
     if ($t.Kind -eq 'OldVersion') {
         $ov = Find-OldVersions
-        $bytes = 0L
-        foreach ($d in $ov) {
-            foreach ($f in @(Get-ChildItem -LiteralPath $d.FullName -Recurse -File -Force -ErrorAction SilentlyContinue)) { $bytes += $f.Length }
-        }
+        $m = Measure-One ([pscustomobject]@{
+            Paths    = @($ov | ForEach-Object { $_.FullName })
+            Recurse  = $true
+            Patterns = @()
+        })
         $t | Add-Member -MemberType NoteProperty -Name Items -Value $ov -Force
-        $t | Add-Member -MemberType NoteProperty -Name Bytes -Value $bytes -Force
+        $t | Add-Member -MemberType NoteProperty -Name Bytes -Value $m.Bytes -Force
         $t | Add-Member -MemberType NoteProperty -Name FileCount -Value $ov.Count -Force
         $t | Add-Member -MemberType NoteProperty -Name Available -Value ($ov.Count -gt 0) -Force
         continue
@@ -719,8 +750,19 @@ if (-not $Yes) {
         foreach ($part in $choice.Split(@(',', ' ', ';'), [System.StringSplitOptions]::RemoveEmptyEntries)) {
             $n = 0
             if ([int]::TryParse($part, [ref]$n)) { $ids += $n }
+            else { Write-Host ('  无法识别的输入已忽略: {0}' -f $part) -ForegroundColor Yellow }
         }
         $selected = @($usable | Where-Object { $ids -contains $_.Id })
+        # 输入里被丢掉的两类要分别说明，否则用户以为已经清理了
+        $knownIds = @($targets | ForEach-Object { $_.Id })
+        $selIds   = @($selected | ForEach-Object { $_.Id })
+        $unknown  = @($ids | Where-Object { $knownIds -notcontains $_ })
+        $nothing  = @($ids | Where-Object { ($knownIds -contains $_) -and ($selIds -notcontains $_) })
+        if ($unknown.Count -gt 0) { Write-Host ('  没有这些编号: {0}' -f ($unknown -join '、')) -ForegroundColor Yellow }
+        if ($nothing.Count -gt 0) {
+            $names = @($targets | Where-Object { $nothing -contains $_.Id } | ForEach-Object { ('{0} {1}' -f $_.Id, $_.Name) })
+            Write-Host ('  这些项目本次没有可清理内容，已跳过: {0}' -f ($names -join '、')) -ForegroundColor Yellow
+        }
     }
 } else {
     $selected = @($usable | Where-Object { $_.Default })
@@ -842,7 +884,6 @@ foreach ($t in $selected) {
         if ($MinAgeDays -gt 0) { Write-Host '       注意：注册表项没有文件年龄，-MinAgeDays 对本项不生效' -ForegroundColor DarkYellow }
         $dead = @{}
         foreach ($it in $t.Items) { $dead[$it.App.ToLower()] = 1 }
-
         # FileExts 只遍历一遍，原来这个清扫嵌在每条 item 的循环里
         $extRoot = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FileExts'
         if ($dead.Count -gt 0 -and (Test-Path $extRoot)) {
@@ -871,7 +912,8 @@ foreach ($t in $selected) {
         }
 
         foreach ($it in $t.Items) {
-            try { Remove-Item -Path $it.Path -Recurse -Force -ErrorAction Stop; $d++ } catch { $s++ }
+            # 必须 -LiteralPath：键名里的 ? * [ ] 会被 -Path 当通配符，实测能删掉隔壁正常程序的键
+            try { Remove-Item -LiteralPath $it.Path -Recurse -Force -ErrorAction Stop; $d++ } catch { $s++ }
         }
         Write-Host ('       清除 {0} 个打开方式条目' -f $d) -ForegroundColor Green
         if ($s -gt 0) { Write-Host ('       跳过 {0} 个（多为 HKLM 项，需管理员）' -f $s) -ForegroundColor DarkYellow }
@@ -884,7 +926,8 @@ foreach ($t in $selected) {
         $d = 0; $s = 0
         if ($MinAgeDays -gt 0) { Write-Host '       注意：注册表项没有文件年龄，-MinAgeDays 对本项不生效' -ForegroundColor DarkYellow }
         foreach ($it in $t.Items) {
-            try { Remove-Item -Path $it.Path -Recurse -Force -ErrorAction Stop; $d++ } catch { $s++ }
+            # 同上：卸载表键名常含 [ ] ，-Path 会误伤同级正常键
+            try { Remove-Item -LiteralPath $it.Path -Recurse -Force -ErrorAction Stop; $d++ } catch { $s++ }
         }
         Write-Host ('       清除 {0} 个卸载条目' -f $d) -ForegroundColor Green
         if ($s -gt 0) { Write-Host ('       跳过 {0} 个（多为 HKLM 项，需管理员）' -f $s) -ForegroundColor DarkYellow }
@@ -897,7 +940,7 @@ foreach ($t in $selected) {
         $d = 0; $s = 0; $freed = 0L
         foreach ($dir in $t.Items) {
             $size = 0L
-            foreach ($f in @(Get-ChildItem -LiteralPath $dir.FullName -Recurse -File -Force -ErrorAction SilentlyContinue)) { $size += $f.Length }
+            foreach ($f in (Get-FilesSafe $dir.FullName $true @())) { $size += $f.Length }
             try {
                 Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
                 $d++; $freed += $size
@@ -916,7 +959,13 @@ Write-Host ''
 Write-Host '==============================================' -ForegroundColor Cyan
 Write-Host ('  本次释放: {0}' -f (Format-Size $totalFreed)) -ForegroundColor Green
 Write-Host ('  删除 {0} 个文件，跳过 {1} 项' -f $totalDeleted, $totalSkipped) -ForegroundColor Gray
-Write-Host ('  清理后 C 盘可用: {0:N2} GB' -f ((Get-PSDrive C).Free / 1GB)) -ForegroundColor Green
+$sysDrive = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd(':') } else { 'C' }
+$sd = Get-PSDrive -Name $sysDrive -PSProvider FileSystem -ErrorAction SilentlyContinue
+if ($sd) {
+    Write-Host ('  清理后 {0} 盘可用: {1:N2} GB' -f $sysDrive, ($sd.Free / 1GB)) -ForegroundColor Green
+} else {
+    Write-Host '  清理后剩余空间: 无法读取系统盘' -ForegroundColor DarkGray
+}
 Write-Host '==============================================' -ForegroundColor Cyan
 Write-Host ''
 Write-Host '  说明：仅清理临时文件与缓存，不影响软件本体、账号数据与项目文件。' -ForegroundColor DarkGray
