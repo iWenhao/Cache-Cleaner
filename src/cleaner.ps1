@@ -7,6 +7,8 @@
 #      -IncludeAdmin   额外列出需要管理员权限的项目（以管理员运行时自动列出）
 #      -MinAgeDays N   只清理 N 天前修改的文件（注册表项不适用；回收站会被跳过）
 #      -NoPause        结束时不等待按键
+#      -NoArrow        去掉快捷方式的小箭头（改注册表，需管理员；不删任何文件）
+#      -RestoreArrow   还原快捷方式的小箭头
 #    示例：一键清理缓存.bat -DryRun
 # ------------------------------------------------------------
 #  注：结束时的"按任意键继续"由批处理负责，不在 PowerShell 里等待
@@ -19,6 +21,8 @@ $Yes = $false
 $IncludeAdmin = $false
 $NoPause = $false
 $Report = $false
+$NoArrow = $false
+$RestoreArrow = $false
 $MinAgeDays = 0
 $script:ArgIssues = @()
 for ($i = 0; $i -lt $args.Count; $i++) {
@@ -28,6 +32,8 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     elseif ($a -eq '-IncludeAdmin') { $IncludeAdmin = $true }
     elseif ($a -eq '-NoPause') { $NoPause = $true }
     elseif ($a -eq '-Report') { $Report = $true }
+    elseif ($a -eq '-NoArrow') { $NoArrow = $true }
+    elseif ($a -eq '-RestoreArrow') { $RestoreArrow = $true }
     elseif ($a -eq '-MinAgeDays') {
         $i++
         $n = ''
@@ -501,6 +507,17 @@ if ($IncludeAdmin -or $IsAdmin) {
     }
 }
 
+# 放在管理员块外面：普通用户也要能在表格里看到这一行，选中时才提示需要提权
+Add-Target @{
+    Name    = '快捷方式小箭头'
+    Kind    = 'Arrow'
+    Paths   = @()
+    Admin   = $true
+    Default = $false
+    Danger  = $true
+    Note    = '移除 .lnk/.pif/.url 的 IsShortcut 值，改注册表不删文件；重启资源管理器才生效'
+}
+
 # ---------- 扫描 ----------
 
 Write-Host ''
@@ -524,10 +541,97 @@ if ($script:ArgIssues.Count -gt 0) {
     foreach ($w in $script:ArgIssues) {
         Write-Host ('  参数提示: {0}' -f $w) -ForegroundColor Yellow
     }
-    if ($script:ArgIssues.Count -gt 0 -and -not $DryRun -and -not $Report) {
+    if ($script:ArgIssues.Count -gt 0 -and -not $DryRun -and -not $Report -and -not $NoArrow -and -not $RestoreArrow) {
         Write-Host '  若本意是只看不删，请改用 -DryRun 再运行一次。' -ForegroundColor Yellow
     }
     Write-Host ''
+}
+
+# 小箭头由文件类注册表项上的 IsShortcut 值触发。这里只动 .lnk / .pif / .url 三个类。
+# 本机实测还定义该值的另外几个类（IE.AssocFile.URL、Microsoft.Website、WSHFile、
+# Application.Reference）没有验证过它们是否也参与画箭头，所以不碰。
+$script:ArrowClasses = @('lnkfile', 'piffile', 'InternetShortcut')
+
+function Get-ShortcutArrowPending {
+    # 读取不需要管理员（写入才需要：HKCR 的写实际落在 HKLM\SOFTWARE\Classes）
+    $pending = @()
+    try {
+        $cr = [Microsoft.Win32.Registry]::ClassesRoot
+        foreach ($c in $script:ArrowClasses) {
+            $k = $cr.OpenSubKey($c, $false)
+            if ($null -eq $k) { continue }
+            if (@($k.GetValueNames()) -contains 'IsShortcut') { $pending += $c }
+            $k.Close()
+        }
+    } catch { }
+    return @($pending)
+}
+
+function Set-ShortcutArrow([bool]$remove) {
+    $removed = 0; $restored = 0; $unchanged = 0; $failed = 0
+    try { $cr = [Microsoft.Win32.Registry]::ClassesRoot } catch { $cr = $null }
+    foreach ($c in $script:ArrowClasses) {
+        try {
+            $k = $cr.OpenSubKey($c, $true)
+            if ($null -eq $k) {
+                Write-Host ('    {0,-18} 类不存在，跳过' -f $c) -ForegroundColor DarkGray
+                $unchanged++
+                continue
+            }
+            $has = @($k.GetValueNames()) -contains 'IsShortcut'
+            if ($remove) {
+                if ($has) {
+                    $k.DeleteValue('IsShortcut')
+                    Write-Host ('    {0,-18} 已移除 IsShortcut' -f $c) -ForegroundColor Green
+                    $removed++
+                } else {
+                    Write-Host ('    {0,-18} 本来就没有' -f $c) -ForegroundColor DarkGray
+                    $unchanged++
+                }
+            } else {
+                if ($has) {
+                    Write-Host ('    {0,-18} 已存在，未改动' -f $c) -ForegroundColor DarkGray
+                    $unchanged++
+                } else {
+                    $k.SetValue('IsShortcut', '', [Microsoft.Win32.RegistryValueKind]::String)
+                    Write-Host ('    {0,-18} 已写回空 String 值' -f $c) -ForegroundColor Green
+                    $restored++
+                }
+            }
+            $k.Close()
+        } catch {
+            Write-Host ('    {0,-18} 失败：{1}' -f $c, $_.Exception.Message) -ForegroundColor Red
+            $failed++
+        }
+    }
+    return [pscustomobject]@{ Removed = $removed; Restored = $restored; Unchanged = $unchanged; Failed = $failed }
+}
+
+function Show-ArrowRestartHint {
+    Write-Host ''
+    Write-Host '  生效要重启资源管理器：任务管理器 → Windows 资源管理器 → 重新启动，或注销一次。' -ForegroundColor Cyan
+    Write-Host '  这一步不代你做：taskkill /f /im explorer.exe 会连带关掉你所有已打开的文件夹窗口，' -ForegroundColor DarkGray
+    Write-Host '  而且从提权进程重新拉起的 explorer 可能让之后的所有程序都跟着提权。' -ForegroundColor DarkGray
+}
+
+if ($NoArrow -or $RestoreArrow) {
+    if ($NoArrow -and $RestoreArrow) {
+        Write-Host '  -NoArrow 与 -RestoreArrow 不能同时给，本次什么都不改。' -ForegroundColor Red
+        return
+    }
+    $remove = [bool]$NoArrow
+    Write-Host ('  快捷方式小箭头：{0}（只改注册表，不删除任何文件）' -f $(if ($remove) { '去掉' } else { '还原' })) -ForegroundColor White
+    if (-not $IsAdmin) {
+        Write-Host ''
+        Write-Host '  需要管理员权限。HKCR 的写入实际落在 HKLM\SOFTWARE\Classes，' -ForegroundColor Red
+        Write-Host '  本机实测：普通用户申请写句柄直接 UnauthorizedAccessException。' -ForegroundColor Red
+        Write-Host '  请右键本文件 → 以管理员身份运行，再执行一次。' -ForegroundColor DarkYellow
+        return
+    }
+    $ar = Set-ShortcutArrow $remove
+    Write-Host ('    合计：改动 {0} 个，未变 {1} 个，失败 {2} 个' -f ($ar.Removed + $ar.Restored), $ar.Unchanged, $ar.Failed) -ForegroundColor White
+    Show-ArrowRestartHint
+    return
 }
 
 if ($Report) {
@@ -623,6 +727,14 @@ foreach ($t in $targets) {
         $t | Add-Member -MemberType NoteProperty -Name Available -Value (Test-Path -LiteralPath $t.Paths[0]) -Force
         continue
     }
+    if ($t.Kind -eq 'Arrow') {
+        $ap = Get-ShortcutArrowPending
+        $t | Add-Member -MemberType NoteProperty -Name Items -Value $ap -Force
+        $t | Add-Member -MemberType NoteProperty -Name Bytes -Value 0L -Force
+        $t | Add-Member -MemberType NoteProperty -Name FileCount -Value $ap.Count -Force
+        $t | Add-Member -MemberType NoteProperty -Name Available -Value ($ap.Count -gt 0) -Force
+        continue
+    }
     if ($t.Kind -eq 'Shortcut') {
         $sc = Find-DeadShortcuts
         $t | Add-Member -MemberType NoteProperty -Name Items -Value $sc -Force
@@ -703,7 +815,7 @@ Write-Host ''
 
 # 残留类项目逐条列出，让人看清楚要删的是什么
 foreach ($t in $targets) {
-    if ($t.Kind -notmatch '^(Shortcut|OpenWith|Uninstall|OldVersion)$') { continue }
+    if ($t.Kind -notmatch '^(Shortcut|OpenWith|Uninstall|OldVersion|Arrow)$') { continue }
     if (-not $t.Available) { continue }
     Write-Host ('  · {0} 明细：' -f $t.Name) -ForegroundColor DarkGray
     foreach ($it in ($t.Items | Select-Object -First 12)) {
@@ -711,6 +823,7 @@ foreach ($t in $targets) {
         if ($t.Kind -eq 'OpenWith')   { Write-Host ('      {0}   -> {1}' -f $it.App, $it.Exe) -ForegroundColor DarkGray }
         if ($t.Kind -eq 'Uninstall')  { Write-Host ('      {0}   -> {1}' -f $it.Name, $it.Location) -ForegroundColor DarkGray }
         if ($t.Kind -eq 'OldVersion') { Write-Host ('      {0}' -f $it.FullName) -ForegroundColor DarkGray }
+        if ($t.Kind -eq 'Arrow')      { Write-Host ('      {0}' -f $it) -ForegroundColor DarkGray }
     }
     if ($t.Items.Count -gt 12) { Write-Host ('      ... 另有 {0} 项' -f ($t.Items.Count - 12)) -ForegroundColor DarkGray }
 }
@@ -776,7 +889,7 @@ if ($selected.Count -eq 0) {
 $dangerList = @($selected | Where-Object { $_.Danger })
 if ($dangerList.Count -gt 0) {
     Write-Host ''
-    Write-Host ('  警告：以下项目删除后无法恢复 -> {0}' -f (($dangerList | ForEach-Object { $_.Name }) -join '、')) -ForegroundColor Red
+    Write-Host ('  警告：以下项目会删除内容或改动系统设置 -> {0}' -f (($dangerList | ForEach-Object { $_.Name }) -join '、')) -ForegroundColor Red
     $ack = $null
     try { $ack = Read-Host '  确认请输入 DELETE，其他任意输入则取消' } catch { $ack = $null }
     if ($null -eq $ack) {
@@ -837,6 +950,22 @@ foreach ($t in $selected) {
         } else {
             Write-Host '       pnpm store prune 未成功执行' -ForegroundColor DarkYellow
         }
+        continue
+    }
+
+    if ($t.Kind -eq 'Arrow') {
+        $ar = Set-ShortcutArrow $true
+        if ($ar.Removed -gt 0) {
+            Write-Host ('       已移除 {0} 个文件类的 IsShortcut' -f $ar.Removed) -ForegroundColor Green
+        }
+        if ($ar.Unchanged -gt 0) {
+            Write-Host ('       {0} 个类本来就没有，未改动' -f $ar.Unchanged) -ForegroundColor DarkGray
+        }
+        if ($ar.Failed -gt 0) {
+            Write-Host ('       {0} 个类写入失败' -f $ar.Failed) -ForegroundColor Red
+            $totalSkipped += $ar.Failed
+        }
+        Show-ArrowRestartHint
         continue
     }
 

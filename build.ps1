@@ -46,6 +46,8 @@ REM
 REM  Usage: double-click to run. Optional switches (no spaces inside an
 REM  argument, they are split on whitespace):
 REM    -DryRun  -Yes  -IncludeAdmin  -MinAgeDays N  -NoPause  -Report
+REM    -NoArrow (remove the shortcut overlay arrow, needs admin)
+REM    -RestoreArrow (put it back)
 REM ============================================================
 
 set "CLEANCACHE_SRC=%~f0"
