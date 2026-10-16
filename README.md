@@ -164,6 +164,35 @@ build 把 PowerShell 正文 base64 后按每行 100 字符写成 `REM #B64#`，�
 
 顺带一个坑：从别处拉真实控制台测这条挂窗逻辑时，**不能给 `Start-Process` 加 `-RedirectStandardOutput`**——那会让子进程的 stdin 不再是控制台，`IsInputRedirected` 变 true，挂窗按要求自己跳过了，看起来像"挂不住"，其实是测试环境把输入口堵了。
 
+### 挂窗曾经完全不生效（`-NoPause` 判断的 cmd 陷阱）
+
+上面这套挂窗有一段时间**双击时根本不生效**，窗口照样秒关。根因不在挂窗逻辑，而在它前面那行判断：
+
+```bat
+if not "%CC_ARGS%"=="%CC_ARGS:-NoPause=%" set "CC_PAUSE=0"
+```
+
+想用「替换后是否变了」来探测 `-NoPause`。但**双击时 `%*` 为空**，`CC_ARGS` 是空变量，而 cmd 对空变量的 `%VAR:-X=%` 会展开成 `:-` 后面的字面量本身，也就是 `-NoPause`。于是比较变成 `"" == "-NoPause"`——不相等，`not` 取反后成立，`CC_PAUSE` 被错设为 0，接着 `if "%CC_PAUSE%"=="0" goto cc_end` 直接跳过整段挂窗。
+
+本机实测（改之前）：
+
+| 参数 | `CC_PAUSE` | 对不对 |
+| --- | --- | --- |
+| 空（双击） | 0 | ❌ 应为 1 |
+| `-DryRun` | 1 | ✅ |
+| `-NoPause` | 0 | ✅ |
+
+改成用 `echo|findstr` 查子串，绕开空变量的替换语义：
+
+```bat
+echo %CC_ARGS%| findstr /c:"-NoPause" >nul
+if not errorlevel 1 set "CC_PAUSE=0"
+```
+
+改后实测：空参数 1、`-DryRun` 1、`-NoPause` 0、`-Yes -DryRun -NoPause` 0、`-Yes -DryRun` 1，五组全对；真实产物双击后挂窗进程实测存活 94 秒以上。
+
+这个 bug 有个恼人的地方：**它跟清理逻辑毫无关系**，`-DryRun` 也照样触发，所以很容易误判成"清理把控制台弄坏了"。定位它的关键是做了一个二分——把正文调用整行换成 `rem`、只保留包装器其余全部结构，挂窗依然秒退，由此证明问题在包装器自身，而不在正文。
+
 进度动画不开后台线程，也不上 `Timer`：由统计与删除循环自己刷帧（扫描每 500 个文件一帧、删除每 200 个一帧），一帧就是一个开头的 `\r` 加原地重写的一行，画面只在真干活时动，也绝不会和 `Write-Host` 的输出交叉错位；每轮结束用 `Stop-Spin` 把该行铺空格盖掉。`[Console]::IsOutputRedirected` 为真时整段不画——把输出重定向到日志文件时，几百个 `\r` 是纯垃圾（实测重定向跑 `-DryRun`，产物里 `\r` 计数为 0）。这里踩过一个坑：`[Console]::Write("...{0}{1}{2}..." -f $a, $b, $c)` 里的逗号会被 PowerShell 当成**方法调用的参数分隔符**，`-f` 实际只收到 `$a`，每一帧都抛 FormatError；必须把格式化表达式再套一层括号 `[Console]::Write(("..." -f $a, $b, $c))`。
 
 同理，`.lnk` 快捷方式的目标是直接用二进制解析的，不依赖 `WScript.Shell`；旧格式 .lnk 的路径以系统 ANSI 代码页存储，需显式按 ANSI 代码页解码（`[Text.Encoding]::Default` 在 PowerShell 7 下是 UTF-8，不能用）。

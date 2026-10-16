@@ -53,7 +53,16 @@ REM ============================================================
 set "CLEANCACHE_SRC=%~f0"
 set "CC_ARGS=%*"
 set "CC_PAUSE=1"
-if not "%CC_ARGS%"=="%CC_ARGS:-NoPause=%" set "CC_PAUSE=0"
+REM Substring test via echo|findstr, NOT "%CC_ARGS:-NoPause=%".
+REM When %* is empty CC_ARGS is empty, and %EMPTY%:-NoPause=% expands to
+REM "-NoPause" itself (the literal after :-), so the old comparison became
+REM "" == "-NoPause", the "not" flipped, and CC_PAUSE was set to 0 even with
+REM no switch at all -> the line below jumped straight to cc_end and never
+REM held the window. Measured on this machine: empty args gave CC_PAUSE=0,
+REM -DryRun gave 1. Fixed values now: empty=1, -DryRun=1, -NoPause=0,
+REM "-Yes -DryRun -NoPause"=0, "-Yes -DryRun"=1.
+echo %CC_ARGS%| findstr /c:"-NoPause" >nul
+if not errorlevel 1 set "CC_PAUSE=0"
 
 where powershell >nul 2>&1
 if errorlevel 1 (
