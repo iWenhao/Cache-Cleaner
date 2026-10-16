@@ -1153,7 +1153,13 @@ foreach ($t in $selected) {
 # 只发 2J（清当前屏）+ H（光标归位），**不发 3J**：3J 会连回滚缓冲一起清掉，
 # 那样就再也翻不回去看逐项的「释放 X，删除 N 个文件」了。
 # 输出被重定向时不清（转义序列进日志文件是纯垃圾），复用 Test-SpinOn 的判断。
-if (Test-SpinOn) { [Console]::Write("`e[2J`e[H") }
+#
+# ESC 必须用 [char]27 拼，**不能用反引号 `e**：那是 PowerShell 6+ 才加的转义，
+# 本脚本跑在 5.1 上，`e 被当成普通字母，屏幕上会直接冒出 "e[2Je[H" 这串乱码。
+if (Test-SpinOn) {
+    $esc = [char]27
+    [Console]::Write("$esc[2J$esc[H")
+}
 
 Write-Host '==============================================' -ForegroundColor Cyan
 Write-Host '  清理完成' -ForegroundColor Green
