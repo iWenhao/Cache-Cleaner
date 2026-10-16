@@ -1147,8 +1147,18 @@ foreach ($t in $selected) {
     }
 }
 
-Write-Host ''
+# 打印汇总前清屏，让「清理完成」落在窗口可视区的第一屏。
+# 扫描十几秒 + 逐项删除几十行，不清屏的话汇总会被顶到滚屏外，
+# 用户第一眼看到的仍是过程输出，以为"没有结束提示"。
+# 只发 2J（清当前屏）+ H（光标归位），**不发 3J**：3J 会连回滚缓冲一起清掉，
+# 那样就再也翻不回去看逐项的「释放 X，删除 N 个文件」了。
+# 输出被重定向时不清（转义序列进日志文件是纯垃圾），复用 Test-SpinOn 的判断。
+if (Test-SpinOn) { [Console]::Write("`e[2J`e[H") }
+
 Write-Host '==============================================' -ForegroundColor Cyan
+Write-Host '  清理完成' -ForegroundColor Green
+Write-Host '==============================================' -ForegroundColor Cyan
+Write-Host ''
 Write-Host ('  本次清理 {0} 个项目，释放 {1}（共删除 {2} 个文件）' -f $touchedItems, (Format-Size $totalFreed), $totalDeleted) -ForegroundColor Green
 Write-Host ('  跳过 {0} 项（被占用、无权限或需管理员）' -f $totalSkipped) -ForegroundColor Gray
 $sysDrive = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd(':') } else { 'C' }
@@ -1158,13 +1168,12 @@ if ($sd) {
 } else {
     Write-Host '  清理后剩余空间: 无法读取系统盘' -ForegroundColor DarkGray
 }
-Write-Host '==============================================' -ForegroundColor Cyan
 Write-Host ''
 Write-Host '  说明：仅清理临时文件与缓存，不影响软件本体、账号数据与项目文件。' -ForegroundColor DarkGray
 Write-Host ''
 
 if (-not $NoPause) {
-    Write-Host '  清理结束。窗口不会自己关，看完直接关掉窗口即可（Ctrl+C 也能退出）。' -ForegroundColor DarkGray
+    Write-Host '  窗口不会自己关，看完直接关掉窗口即可（Ctrl+C 也能退出）。' -ForegroundColor DarkGray
     # 挂住窗口的动作在批处理包装器里做（纯等待，不吃按键），这里不等待：
     # 脚本里还有十几处提前 return 的出口，等待放在一处才覆盖得到它们。
 }
