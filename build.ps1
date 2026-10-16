@@ -77,7 +77,19 @@ if not "%EC%"=="0" (
     echo [ERROR] The script stopped with exit code %EC%.
     echo.
 )
-if "%CC_PAUSE%"=="1" pause
+if "%CC_PAUSE%"=="0" goto cc_end
+REM Hold the window so the summary stays readable, with a hold no keystroke can
+REM release.  Measured on this machine, in a real double-click-style console:
+REM   pause                      -> released by a leftover Enter in the input buffer
+REM   timeout /t 3               -> waits 3s correctly
+REM   timeout /t -1              -> waits until ANY key, so the same leftover Enter
+REM                                  closes the window the instant the summary prints
+REM   timeout /t -1 /nobreak     -> returns at once with errorlevel 0 (useless)
+REM Only an idle wait holds, so ask PowerShell to sleep until the window is closed
+REM (Ctrl+C ends it, X closes it).  With redirected input the call returns right
+REM away, which is what piped and scheduled runs need.
+"%CC_PS%" -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "if (-not [Console]::IsInputRedirected) { while ($true) { Start-Sleep -Seconds 3600 } }"
+:cc_end
 endlocal
 '@
 

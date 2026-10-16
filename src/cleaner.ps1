@@ -6,12 +6,12 @@
 #      -Yes            跳过选择，直接清理默认项
 #      -IncludeAdmin   额外列出需要管理员权限的项目（以管理员运行时自动列出）
 #      -MinAgeDays N   只清理 N 天前修改的文件（注册表项不适用；回收站会被跳过）
-#      -NoPause        结束时不等待按键
+#      -NoPause        结束立刻退出，不挂住窗口
 #      -NoArrow        去掉快捷方式的小箭头（改注册表，需管理员；不删任何文件）
 #      -RestoreArrow   还原快捷方式的小箭头
 #    示例：一键清理缓存.bat -DryRun
 # ------------------------------------------------------------
-#  注：结束时的"按任意键继续"由批处理负责，不在 PowerShell 里等待
+#  注：结束时的"挂住窗口不自动关闭"由批处理负责，不在 PowerShell 里等待
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $Host.UI.RawUI.WindowTitle = '一键清理缓存'
@@ -135,14 +135,32 @@ function Get-FilesSafe($path, $recurse, $patterns) {
     return $filtered.ToArray()
 }
 
+# 进度动画。不用后台线程：删除/统计循环每处理够多个文件自己刷一帧，
+# 这样画面只在真干活时动，也不会和 Write-Host 的输出互相打断。
+# 输出被重定向时完全不画——日志文件里塞一堆 \r 是垃圾行。
+$script:SpinFrames = @('|', '/', '-', '\')
+$script:SpinTick = 0
+function Test-SpinOn { return (-not [Console]::IsOutputRedirected) }
+function Write-Spin([int]$n, [string]$verb) {
+    if (-not (Test-SpinOn)) { return }
+    $script:SpinTick = ($script:SpinTick + 1) % $script:SpinFrames.Count
+    [Console]::Write(("`r     {0}  已{1} {2} 个文件 ..." -f $script:SpinFrames[$script:SpinTick], $verb, $n))
+}
+function Stop-Spin {
+    if (-not (Test-SpinOn)) { return }
+    [Console]::Write("`r" + (' ' * 90) + "`r")
+}
+
 function Measure-One($t) {
     $bytes = 0L
     $count = 0
+    Write-Spin 0 '扫描'
     foreach ($p in $t.Paths) {
         foreach ($f in (Get-FilesSafe $p $t.Recurse $t.Patterns)) {
             if (-not (Test-AgeOk $f)) { continue }
             $bytes += $f.Length
             $count++
+            if (($count % 500) -eq 0) { Write-Spin $count '扫描' }
         }
     }
     return [pscustomobject]@{ Bytes = $bytes; Files = $count }
@@ -150,6 +168,7 @@ function Measure-One($t) {
 
 function Clear-One($t) {
     $r = [pscustomobject]@{ Freed = 0L; Deleted = 0; Skipped = 0 }
+    Write-Spin 0 '处理'
     foreach ($p in $t.Paths) {
         foreach ($f in (Get-FilesSafe $p $t.Recurse $t.Patterns)) {
             if (-not (Test-AgeOk $f)) { continue }
@@ -160,6 +179,7 @@ function Clear-One($t) {
             } catch {
                 $r.Skipped++
             }
+            if ((($r.Deleted + $r.Skipped) % 200) -eq 0) { Write-Spin ($r.Deleted + $r.Skipped) '处理' }
         }
     }
     return $r
@@ -809,6 +829,7 @@ foreach ($t in $targets) {
     $t | Add-Member -MemberType NoteProperty -Name Available -Value ($t.Paths.Count -gt 0 -and ($m.Bytes -gt 0 -or $m.Files -gt 0)) -Force
 }
 
+Stop-Spin
 $header = '  ' + (Pad-Right '#' 4) + (Pad-Right '项目' 18) + (Pad-Left '占用' 10) + '  ' + (Pad-Right '默认' 5) + '说明'
 Write-Host $header -ForegroundColor White
 Write-Host ('  ' + ('-' * 76)) -ForegroundColor DarkGray
@@ -949,6 +970,7 @@ Write-Host ''
 $totalFreed = 0L
 $totalSkipped = 0
 $totalDeleted = 0
+$touchedItems = 0
 
 foreach ($t in $selected) {
     Write-Host ('  [{0}] {1} ...' -f $t.Id, $t.Name) -ForegroundColor Gray
@@ -960,9 +982,11 @@ foreach ($t in $selected) {
 
     if ($t.Kind -eq 'Files') {
         $r = Clear-One $t
+        Stop-Spin
         $totalFreed += $r.Freed
         $totalDeleted += $r.Deleted
         $totalSkipped += $r.Skipped
+        if ($r.Deleted -gt 0) { $touchedItems++ }
         Write-Host ('       释放 {0}，删除 {1} 个文件' -f (Format-Size $r.Freed), $r.Deleted) -ForegroundColor Green
         if ($r.Skipped -gt 0) {
             Write-Host ('       跳过 {0} 个文件（被占用或无权限）' -f $r.Skipped) -ForegroundColor DarkYellow
@@ -978,6 +1002,7 @@ foreach ($t in $selected) {
         & pnpm store prune 2>$null | Out-Null
         if ($LASTEXITCODE -eq 0) {
             Write-Host '       已执行 pnpm store prune' -ForegroundColor Green
+            $touchedItems++
         } else {
             Write-Host '       pnpm store prune 未成功执行' -ForegroundColor DarkYellow
         }
@@ -988,6 +1013,7 @@ foreach ($t in $selected) {
         $ar = Set-ShortcutArrow $true
         if ($ar.Removed -gt 0) {
             Write-Host ('       已移除 {0} 个文件类的 IsShortcut' -f $ar.Removed) -ForegroundColor Green
+            $touchedItems++
         }
         if ($ar.Unchanged -gt 0) {
             Write-Host ('       {0} 个类本来就没有，未改动' -f $ar.Unchanged) -ForegroundColor DarkGray
@@ -1009,6 +1035,7 @@ foreach ($t in $selected) {
             Clear-RecycleBin -Force -ErrorAction Stop
             Write-Host ('       已清空 {0} 个卷的回收站，释放 {1}' -f $t.Paths.Count, (Format-Size $t.Bytes)) -ForegroundColor Green
             $totalFreed += $t.Bytes
+            $touchedItems++
         } catch {
             Write-Host '       清空失败（可能需要管理员权限）' -ForegroundColor DarkYellow
             $totalSkipped++
@@ -1020,6 +1047,7 @@ foreach ($t in $selected) {
         try {
             Remove-Item -LiteralPath $t.Paths[0] -Recurse -Force -ErrorAction Stop
             Write-Host '       已删除 Windows.old' -ForegroundColor Green
+            $touchedItems++
         } catch {
             Write-Host '       删除失败，建议用系统「磁盘清理 → 清理系统文件」处理' -ForegroundColor DarkYellow
             $totalSkipped++
@@ -1034,6 +1062,7 @@ foreach ($t in $selected) {
         }
         Write-Host ('       删除 {0} 个失效快捷方式' -f $d) -ForegroundColor Green
         if ($s -gt 0) { Write-Host ('       跳过 {0} 个（无权限）' -f $s) -ForegroundColor DarkYellow }
+        if ($d -gt 0) { $touchedItems++ }
         $totalDeleted += $d
         $totalSkipped += $s
         continue
@@ -1077,6 +1106,7 @@ foreach ($t in $selected) {
         }
         Write-Host ('       清除 {0} 个打开方式条目' -f $d) -ForegroundColor Green
         if ($s -gt 0) { Write-Host ('       跳过 {0} 个（多为 HKLM 项，需管理员）' -f $s) -ForegroundColor DarkYellow }
+        if ($d -gt 0) { $touchedItems++ }
         $totalDeleted += $d
         $totalSkipped += $s
         continue
@@ -1091,6 +1121,7 @@ foreach ($t in $selected) {
         }
         Write-Host ('       清除 {0} 个卸载条目' -f $d) -ForegroundColor Green
         if ($s -gt 0) { Write-Host ('       跳过 {0} 个（多为 HKLM 项，需管理员）' -f $s) -ForegroundColor DarkYellow }
+        if ($d -gt 0) { $touchedItems++ }
         $totalDeleted += $d
         $totalSkipped += $s
         continue
@@ -1109,6 +1140,7 @@ foreach ($t in $selected) {
         Write-Host ('       删除 {0} 个旧版本目录，释放 {1}' -f $d, (Format-Size $freed)) -ForegroundColor Green
         if ($s -gt 0) { Write-Host ('       跳过 {0} 个（被占用）' -f $s) -ForegroundColor DarkYellow }
         $totalFreed += $freed
+        if ($d -gt 0) { $touchedItems++ }
         $totalDeleted += $d
         $totalSkipped += $s
         continue
@@ -1117,8 +1149,8 @@ foreach ($t in $selected) {
 
 Write-Host ''
 Write-Host '==============================================' -ForegroundColor Cyan
-Write-Host ('  本次释放: {0}' -f (Format-Size $totalFreed)) -ForegroundColor Green
-Write-Host ('  删除 {0} 个文件，跳过 {1} 项' -f $totalDeleted, $totalSkipped) -ForegroundColor Gray
+Write-Host ('  本次清理 {0} 个项目，释放 {1}（共删除 {2} 个文件）' -f $touchedItems, (Format-Size $totalFreed), $totalDeleted) -ForegroundColor Green
+Write-Host ('  跳过 {0} 项（被占用、无权限或需管理员）' -f $totalSkipped) -ForegroundColor Gray
 $sysDrive = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd(':') } else { 'C' }
 $sd = Get-PSDrive -Name $sysDrive -PSProvider FileSystem -ErrorAction SilentlyContinue
 if ($sd) {
@@ -1131,5 +1163,9 @@ Write-Host ''
 Write-Host '  说明：仅清理临时文件与缓存，不影响软件本体、账号数据与项目文件。' -ForegroundColor DarkGray
 Write-Host ''
 
-if (-not $NoPause) { Write-Host '  按任意键关闭窗口...' -ForegroundColor DarkGray }
+if (-not $NoPause) {
+    Write-Host '  清理结束。窗口不会自己关，看完直接关掉窗口即可（Ctrl+C 也能退出）。' -ForegroundColor DarkGray
+    # 挂住窗口的动作在批处理包装器里做（纯等待，不吃按键），这里不等待：
+    # 脚本里还有十几处提前 return 的出口，等待放在一处才覆盖得到它们。
+}
 return
